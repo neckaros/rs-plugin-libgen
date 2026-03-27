@@ -30,6 +30,7 @@ fn test_lookup_metadata_title_search() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: Some("dune frank herbert".to_string()),
+            author: None,
             ids: None,
             page_key: None,
         }),
@@ -80,6 +81,7 @@ fn test_lookup_returns_download_requests() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: Some("storm front jim butcher".to_string()),
+            author: None,
             ids: None,
             page_key: None,
         }),
