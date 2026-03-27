@@ -1,0 +1,17 @@
+[package]
+name = "rs-plugin-libgen"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4.1"
+rs-plugin-common-interfaces = "0.34.0"
+scraper = "0.24"
+serde_json = "1"
+regex = "1"
+
+[dev-dependencies]
+extism = "1"
