@@ -1,0 +1,57 @@
+name: Release WASM on Version Bump
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'Cargo.toml'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Get current version
+        id: current_version
+        run: |
+          CURRENT_VERSION=$(grep '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get previous version
+        id: prev_version
+        run: |
+          PREV_VERSION=$(git show HEAD~1:Cargo.toml | grep '^version' | cut -d'"' -f2)
+          echo "version=$PREV_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if version changed
+        id: version_check
+        run: |
+          if [ "${{ steps.current_version.outputs.version }}" != "${{ steps.prev_version.outputs.version }}" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build WASM
+        if: steps.version_check.outputs.changed == 'true'
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Create GitHub Release
+        if: steps.version_check.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.current_version.outputs.version }}
+          name: Release v${{ steps.current_version.outputs.version }}
+          body: Production release of WASM plugin.
+          files: target/wasm32-unknown-unknown/release/rs_plugin_libgen.wasm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
