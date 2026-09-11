@@ -1,7 +1,7 @@
 use rs_plugin_common_interfaces::{
     domain::{
         book::Book,
-        person::Person,
+        person::{Person, PersonType},
         Relations,
     },
     lookup::{RsLookupMatchType, RsLookupMetadataResult, RsLookupMetadataResultWrapper},
@@ -136,7 +136,7 @@ pub fn libgen_book_to_result(
         Some(vec![Person {
             id: other_id,
             name: book.author.clone(),
-            kind: Some("author".to_string()),
+            kind: Some(PersonType::Author),
             params: Some(serde_json::Value::Object(author_params)),
             generated: true,
             ..Default::default()
@@ -249,6 +249,8 @@ mod tests {
         let relations = result.relations.expect("Expected relations");
         let people = relations.people_details.expect("Expected people");
         assert_eq!(people[0].name, "Test Author");
+        assert_eq!(people[0].kind, Some(PersonType::Author));
+        assert_eq!(serde_json::to_value(&people[0]).unwrap()["type"], "Author");
         assert_eq!(people[0].id, "libgen-author:test-author");
         assert_eq!(result.match_type, Some(RsLookupMatchType::ExactId));
     }
