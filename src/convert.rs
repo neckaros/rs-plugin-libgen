@@ -145,6 +145,8 @@ pub fn libgen_book_to_result(
 
     let relations = if people_details.is_some() {
         Some(Relations {
+            people_roles: people_details.as_ref().map(|people| people.iter().map(|person|
+                (person.id.clone(), vec![PersonType::Author])).collect()),
             people_details,
             ..Default::default()
         })
@@ -250,6 +252,7 @@ mod tests {
         let people = relations.people_details.expect("Expected people");
         assert_eq!(people[0].name, "Test Author");
         assert_eq!(people[0].kind, Some(PersonType::Author));
+        assert_eq!(relations.people_roles.as_ref().unwrap()[&people[0].id], vec![PersonType::Author]);
         assert_eq!(serde_json::to_value(&people[0]).unwrap()["type"], "Author");
         assert_eq!(people[0].id, "libgen-author:test-author");
         assert_eq!(result.match_type, Some(RsLookupMatchType::ExactId));
