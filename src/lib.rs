@@ -30,7 +30,7 @@ pub fn infos() -> FnResult<Json<PluginInformation>> {
     Ok(Json(PluginInformation {
         name: "libgen_source".into(),
         capabilities: vec![PluginType::LookupMetadata, PluginType::Lookup],
-        version: 5,
+        version: 6,
         interface_version: 1,
         repo: Some("https://github.com/neckaros/rs-plugin-libgen".to_string()),
         publisher: "neckaros".into(),
