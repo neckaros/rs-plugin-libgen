@@ -1,10 +1,9 @@
 
 ### Relationship credits
 
-The plugin emits `relations.peopleRoles`, keyed by person summary ID, using
-canonical PersonType string arrays. These describe this credit, independently
-of the person profile type.
-Book author credits emit `["Author"]`. No character names are fabricated.
+Author credits are returned as person objects in `relations.peopleDetails`,
+with inline `roles: ["Author"]`. Unknown character names and rank are omitted.
+No parallel credit maps or compatibility adapters are used.
 
-This PR pins common interfaces 0.39.0 to its source revision while
-the shared-interface release is pending.
+This requires the matching server/interface 0.40.0 update. Update the server
+and credit-producing plugins together, then refresh existing metadata as needed.

@@ -1,6 +1,6 @@
 [package]
 name = "rs-plugin-libgen"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 
 [lib]
@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 extism-pdk = "1.4.1"
-rs-plugin-common-interfaces = { git = "https://github.com/neckaros/rs-plugin-common-interfaces", rev = "d48d51027777d7c2679ff2d26491bffe330e4b14", version = "0.39.0" }
+rs-plugin-common-interfaces = { git = "https://github.com/neckaros/rs-plugin-common-interfaces", rev = "9d85ee9ae32188063c5c7b018b0d25cae37ee81b", version = "0.40.0" }
 scraper = "0.24"
 serde_json = "1"
 regex = "1"

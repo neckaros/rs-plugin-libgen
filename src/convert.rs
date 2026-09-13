@@ -1,7 +1,7 @@
 use rs_plugin_common_interfaces::{
     domain::{
         book::Book,
-        person::{Person, PersonType},
+        person::{Person, PersonType, PersonWithRoles},
         Relations,
     },
     lookup::{RsLookupMatchType, RsLookupMetadataResult, RsLookupMetadataResultWrapper},
@@ -133,20 +133,22 @@ pub fn libgen_book_to_result(
         let mut author_params = serde_json::Map::new();
         author_params.insert("otherids".to_string(), json!([other_id.clone()]));
 
-        Some(vec![Person {
-            id: other_id,
-            name: book.author.clone(),
-            kind: Some(PersonType::Author),
-            params: Some(serde_json::Value::Object(author_params)),
-            generated: true,
+        Some(vec![PersonWithRoles {
+            person: Person {
+                id: other_id,
+                name: book.author.clone(),
+                kind: Some(PersonType::Author),
+                params: Some(serde_json::Value::Object(author_params)),
+                generated: true,
+                ..Default::default()
+            },
+            roles: Some(vec![PersonType::Author]),
             ..Default::default()
         }])
     };
 
     let relations = if people_details.is_some() {
         Some(Relations {
-            people_roles: people_details.as_ref().map(|people| people.iter().map(|person|
-                (person.id.clone(), vec![PersonType::Author])).collect()),
             people_details,
             ..Default::default()
         })
@@ -250,11 +252,12 @@ mod tests {
         let result = libgen_book_to_result(book, Some(RsLookupMatchType::ExactId));
         let relations = result.relations.expect("Expected relations");
         let people = relations.people_details.expect("Expected people");
-        assert_eq!(people[0].name, "Test Author");
-        assert_eq!(people[0].kind, Some(PersonType::Author));
-        assert_eq!(relations.people_roles.as_ref().unwrap()[&people[0].id], vec![PersonType::Author]);
+        assert_eq!(people[0].person.name, "Test Author");
+        assert_eq!(people[0].person.kind, Some(PersonType::Author));
+        assert_eq!(people[0].roles, Some(vec![PersonType::Author]));
+        assert_eq!(people[0].rank, None);
         assert_eq!(serde_json::to_value(&people[0]).unwrap()["type"], "Author");
-        assert_eq!(people[0].id, "libgen-author:test-author");
+        assert_eq!(people[0].person.id, "libgen-author:test-author");
         assert_eq!(result.match_type, Some(RsLookupMatchType::ExactId));
     }
 
