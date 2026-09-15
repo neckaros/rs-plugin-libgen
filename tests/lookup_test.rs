@@ -2,7 +2,7 @@ use extism::{Manifest, Plugin, Wasm};
 use rs_plugin_common_interfaces::{
     lookup::{
         RsLookupBook, RsLookupMetadataResults, RsLookupQuery, RsLookupSourceResult,
-        RsLookupWrapper,
+        RsLookupSerieFilter, RsLookupWrapper,
     },
     PluginInformation,
 };
@@ -33,6 +33,7 @@ fn test_lookup_metadata_title_search() {
             author: None,
             ids: None,
             page_key: None,
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -51,6 +52,34 @@ fn test_lookup_metadata_title_search() {
     for (i, r) in results.results.iter().take(3).enumerate() {
         println!("  [{}] {:?}", i, r.metadata);
     }
+}
+
+#[test]
+fn test_lookup_metadata_series_only_search() {
+    let mut plugin = build_plugin();
+    let input = RsLookupWrapper {
+        query: RsLookupQuery::Book(RsLookupBook {
+            series: Some(vec![RsLookupSerieFilter {
+                name: Some("The Dresden Files".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        credential: None,
+        params: None,
+    };
+
+    let input_json = serde_json::to_string(&input).unwrap();
+    let res = plugin
+        .call::<&str, String>("lookup_metadata", &input_json)
+        .expect("series-only lookup_metadata call failed");
+    let results: RsLookupMetadataResults =
+        serde_json::from_str(&res).expect("Failed to parse results");
+
+    assert!(
+        !results.results.is_empty(),
+        "Expected results from Libgen's dedicated series column"
+    );
 }
 
 #[test]
@@ -84,6 +113,7 @@ fn test_lookup_returns_download_requests() {
             author: None,
             ids: None,
             page_key: None,
+            ..Default::default()
         }),
         credential: None,
         params: None,

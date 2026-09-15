@@ -1,7 +1,7 @@
 use extism_pdk::{http, log, plugin_fn, FnResult, HttpRequest, Json, LogLevel, WithReturnCode};
 
 use rs_plugin_common_interfaces::{
-    domain::external_images::ExternalImage,
+    domain::{external_images::ExternalImage, person::PersonType},
     lookup::{
         RsLookupMatchType, RsLookupMetadataResults, RsLookupQuery, RsLookupSourceResult,
         RsLookupWrapper,
@@ -22,7 +22,7 @@ use libgen::{
 
 enum LookupTarget {
     IsbnSearch(String),
-    TitleSearch(String),
+    TitleSearch { query: String, include_series: bool },
 }
 
 #[plugin_fn]
@@ -48,9 +48,10 @@ fn build_http_request(url: String) -> HttpRequest {
         method: Some("GET".into()),
     };
 
-    request
-        .headers
-        .insert("Accept".to_string(), "text/html,application/xhtml+xml".to_string());
+    request.headers.insert(
+        "Accept".to_string(),
+        "text/html,application/xhtml+xml".to_string(),
+    );
     request.headers.insert(
         "User-Agent".to_string(),
         "Mozilla/5.0 (compatible; rs-plugin-libgen/0.1)".to_string(),
@@ -109,24 +110,167 @@ fn resolve_lookup_targets(lookup: &RsLookupWrapper) -> Vec<LookupTarget> {
     // Priority 2: ISBN detected in name
     if let Some(name) = book.name.as_deref() {
         if let Some(isbn) = detect_isbn_query(name) {
-            if !targets.iter().any(|t| matches!(t, LookupTarget::IsbnSearch(i) if *i == isbn)) {
+            if !targets
+                .iter()
+                .any(|t| matches!(t, LookupTarget::IsbnSearch(i) if *i == isbn))
+            {
                 targets.push(LookupTarget::IsbnSearch(isbn));
             }
         }
     }
 
-    // Priority 3: Title + author search
-    if let Some(name) = book.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-        if detect_isbn_query(name).is_none() {
-            let search = match book.author.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-                Some(author) => format!("{name} {author}"),
-                None => name.to_string(),
-            };
-            targets.push(LookupTarget::TitleSearch(search));
-        }
+    // Priority 3: Search the title/author index with every supported relation term.
+    if let Some(search) = build_text_search(book) {
+        targets.push(LookupTarget::TitleSearch {
+            query: search,
+            include_series: book
+                .series
+                .as_ref()
+                .is_some_and(|series| !series.is_empty()),
+        });
     }
 
     targets
+}
+
+fn build_text_search(book: &rs_plugin_common_interfaces::lookup::RsLookupBook) -> Option<String> {
+    // Libgen exposes no searchable tag metadata. Returning no target avoids
+    // silently broadening a filtered request.
+    if book.tags.as_ref().is_some_and(|tags| !tags.is_empty()) {
+        return None;
+    }
+
+    let mut terms = Vec::new();
+    if let Some(name) = book
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && detect_isbn_query(name).is_none())
+    {
+        push_unique_term(&mut terms, name);
+    }
+    if let Some(author) = book
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+    {
+        push_unique_term(&mut terms, author);
+    }
+
+    for person in book.people.as_deref().unwrap_or_default() {
+        if person
+            .role
+            .as_ref()
+            .is_some_and(|role| role != &PersonType::Author)
+        {
+            return None;
+        }
+        let value = person
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                person
+                    .ids
+                    .as_ref()
+                    .and_then(|ids| ids.get("libgen-author"))
+                    .map(|value| value.replace('-', " "))
+            })?;
+        push_unique_term(&mut terms, &value);
+    }
+
+    for series in book.series.as_deref().unwrap_or_default() {
+        let name = series
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())?;
+        push_unique_term(&mut terms, name);
+    }
+
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+fn push_unique_term(terms: &mut Vec<String>, value: &str) {
+    if !terms.iter().any(|term| term.eq_ignore_ascii_case(value)) {
+        terms.push(value.to_string());
+    }
+}
+
+fn book_matches_filters(
+    query: &rs_plugin_common_interfaces::lookup::RsLookupBook,
+    book: &LibgenBook,
+) -> bool {
+    if query.tags.as_ref().is_some_and(|tags| !tags.is_empty()) {
+        return false;
+    }
+
+    let author_key = normalize_filter_value(&book.author);
+    for person in query.people.as_deref().unwrap_or_default() {
+        if person
+            .role
+            .as_ref()
+            .is_some_and(|role| role != &PersonType::Author)
+        {
+            return false;
+        }
+        let name_matches = person.name.as_deref().is_some_and(|name| {
+            let name = normalize_filter_value(name);
+            !name.is_empty() && author_key.contains(&name)
+        });
+        let id_matches = person.ids.as_ref().is_some_and(|ids| {
+            ids.get("libgen-author")
+                .map(normalize_filter_value)
+                .is_some_and(|id| !id.is_empty() && author_key.contains(&id))
+        });
+        if !name_matches && !id_matches {
+            return false;
+        }
+    }
+
+    let series_key = book.series.as_deref().map(normalize_filter_value);
+    for series in query.series.as_deref().unwrap_or_default() {
+        let name_matches = series.name.as_deref().is_some_and(|name| {
+            let name = normalize_filter_value(name);
+            !name.is_empty()
+                && series_key
+                    .as_deref()
+                    .is_some_and(|series| series.contains(&name))
+        });
+        if !name_matches {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn normalize_filter_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn filter_search_results(
+    query: &rs_plugin_common_interfaces::lookup::RsLookupBook,
+    mut books: Vec<LibgenBook>,
+    next_page_key: Option<String>,
+) -> (Vec<LibgenBook>, Option<String>) {
+    books.retain(|book| book_matches_filters(query, book));
+    (books, next_page_key)
 }
 
 fn execute_search(
@@ -135,7 +279,14 @@ fn execute_search(
 ) -> FnResult<(Vec<LibgenBook>, Option<String>)> {
     let (query, column) = match target {
         LookupTarget::IsbnSearch(isbn) => (isbn.as_str(), SearchColumn::Isbn),
-        LookupTarget::TitleSearch(title) => (title.as_str(), SearchColumn::TitleAuthor),
+        LookupTarget::TitleSearch {
+            query,
+            include_series: true,
+        } => (query.as_str(), SearchColumn::TitleAuthorSeries),
+        LookupTarget::TitleSearch {
+            query,
+            include_series: false,
+        } => (query.as_str(), SearchColumn::TitleAuthor),
     };
 
     let url = build_search_url(query, page, &column)
@@ -192,14 +343,21 @@ pub fn lookup_metadata(
         _ => None,
     };
 
-    // Try each target in priority order until we get results
+    // Try each target in priority order until we get results. Keep a provider
+    // pagination key even when stricter local relation checks empty this page.
+    let mut filtered_page_next_key = None;
     for target in &targets {
         let match_type = match target {
             LookupTarget::IsbnSearch(_) => Some(RsLookupMatchType::ExactId),
-            LookupTarget::TitleSearch(_) => Some(RsLookupMatchType::ExactText),
+            LookupTarget::TitleSearch { .. } => Some(RsLookupMatchType::ExactText),
         };
 
         let (books, next_page_key) = execute_search(target, page)?;
+        let book_query = match &lookup.query {
+            RsLookupQuery::Book(query) => query,
+            _ => unreachable!("lookup targets are only produced for books"),
+        };
+        let (books, next_page_key) = filter_search_results(book_query, books, next_page_key);
         if !books.is_empty() {
             let results = books
                 .into_iter()
@@ -210,11 +368,14 @@ pub fn lookup_metadata(
                 next_page_key,
             }));
         }
+        if filtered_page_next_key.is_none() {
+            filtered_page_next_key = next_page_key;
+        }
     }
 
     Ok(Json(RsLookupMetadataResults {
         results: vec![],
-        next_page_key: None,
+        next_page_key: filtered_page_next_key,
     }))
 }
 
@@ -235,7 +396,12 @@ pub fn lookup(Json(lookup): Json<RsLookupWrapper>) -> FnResult<Json<RsLookupSour
 
     // Try each target in priority order until we get results
     for target in &targets {
-        let (books, _) = execute_search(target, None)?;
+        let (books, next_page_key) = execute_search(target, None)?;
+        let book_query = match &lookup.query {
+            RsLookupQuery::Book(query) => query,
+            _ => unreachable!("lookup targets are only produced for books"),
+        };
+        let (books, _) = filter_search_results(book_query, books, next_page_key);
         if books.is_empty() {
             continue;
         }
@@ -263,7 +429,9 @@ pub fn lookup(Json(lookup): Json<RsLookupWrapper>) -> FnResult<Json<RsLookupSour
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rs_plugin_common_interfaces::lookup::{RsLookupBook, RsLookupMovie};
+    use rs_plugin_common_interfaces::lookup::{
+        RsLookupBook, RsLookupMovie, RsLookupPersonFilter, RsLookupSerieFilter, RsLookupTagFilter,
+    };
 
     #[test]
     fn resolve_targets_non_book_returns_empty() {
@@ -283,6 +451,7 @@ mod tests {
                 author: None,
                 ids: None,
                 page_key: None,
+                ..Default::default()
             }),
             credential: None,
             params: None,
@@ -298,6 +467,7 @@ mod tests {
                 author: None,
                 ids: None,
                 page_key: None,
+                ..Default::default()
             }),
             credential: None,
             params: None,
@@ -318,6 +488,7 @@ mod tests {
                 author: Some("Jim Butcher".to_string()),
                 ids: None,
                 page_key: None,
+                ..Default::default()
             }),
             credential: None,
             params: None,
@@ -325,7 +496,10 @@ mod tests {
         let targets = resolve_lookup_targets(&lookup);
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            LookupTarget::TitleSearch(search) => assert_eq!(search, "Changes Jim Butcher"),
+            LookupTarget::TitleSearch {
+                query,
+                include_series: false,
+            } => assert_eq!(query, "Changes Jim Butcher"),
             _ => panic!("Expected title search with author"),
         }
     }
@@ -340,6 +514,7 @@ mod tests {
                 author: Some("Jim Butcher".to_string()),
                 ids: Some(ids),
                 page_key: None,
+                ..Default::default()
             }),
             credential: None,
             params: None,
@@ -351,8 +526,113 @@ mod tests {
             _ => panic!("Expected ISBN first"),
         }
         match &targets[1] {
-            LookupTarget::TitleSearch(search) => assert_eq!(search, "Storm Front Jim Butcher"),
+            LookupTarget::TitleSearch {
+                query,
+                include_series: false,
+            } => assert_eq!(query, "Storm Front Jim Butcher"),
             _ => panic!("Expected title+author fallback"),
         }
+    }
+
+    #[test]
+    fn resolve_targets_uses_people_and_series_names() {
+        let lookup = RsLookupWrapper {
+            query: RsLookupQuery::Book(RsLookupBook {
+                name: Some("Dune".to_string()),
+                people: Some(vec![RsLookupPersonFilter {
+                    name: Some("Frank Herbert".to_string()),
+                    role: None,
+                    ..Default::default()
+                }]),
+                series: Some(vec![RsLookupSerieFilter {
+                    name: Some("Dune Chronicles".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            credential: None,
+            params: None,
+        };
+
+        let targets = resolve_lookup_targets(&lookup);
+        assert!(matches!(
+            targets.as_slice(),
+            [LookupTarget::TitleSearch { query, include_series: true }]
+                if query == "Dune Frank Herbert Dune Chronicles"
+        ));
+    }
+
+    #[test]
+    fn resolve_targets_accepts_author_role_and_libgen_author_id() {
+        let mut ids = rs_plugin_common_interfaces::domain::rs_ids::RsIds::default();
+        ids.set("libgen-author", "octavia-e-butler");
+        let lookup = RsLookupWrapper {
+            query: RsLookupQuery::Book(RsLookupBook {
+                people: Some(vec![RsLookupPersonFilter {
+                    ids: Some(ids),
+                    role: Some(PersonType::Author),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            credential: None,
+            params: None,
+        };
+
+        assert!(matches!(
+            resolve_lookup_targets(&lookup).as_slice(),
+            [LookupTarget::TitleSearch { query, include_series: false }]
+                if query == "octavia e butler"
+        ));
+    }
+
+    #[test]
+    fn resolve_targets_rejects_unsupported_roles_and_tags() {
+        for book in [
+            RsLookupBook {
+                name: Some("Dune".to_string()),
+                people: Some(vec![RsLookupPersonFilter {
+                    name: Some("David Lynch".to_string()),
+                    role: Some(PersonType::Director),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            RsLookupBook {
+                name: Some("Dune".to_string()),
+                tags: Some(vec![RsLookupTagFilter {
+                    name: Some("Science Fiction".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+        ] {
+            let lookup = RsLookupWrapper {
+                query: RsLookupQuery::Book(book),
+                credential: None,
+                params: None,
+            };
+            assert!(resolve_lookup_targets(&lookup).is_empty());
+        }
+    }
+
+    #[test]
+    fn filtered_empty_page_preserves_next_page_key() {
+        let query = RsLookupBook {
+            people: Some(vec![RsLookupPersonFilter {
+                name: Some("Frank Herbert".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let books = vec![LibgenBook {
+            title: "A different book".to_string(),
+            author: "Another Author".to_string(),
+            ..Default::default()
+        }];
+
+        let (filtered, next_page_key) = filter_search_results(&query, books, Some("2".to_string()));
+        assert!(filtered.is_empty());
+        assert_eq!(next_page_key.as_deref(), Some("2"));
     }
 }
