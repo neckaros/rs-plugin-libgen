@@ -33,6 +33,7 @@ fn test_lookup_metadata_title_search() {
             author: None,
             ids: None,
             page_key: None,
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -84,6 +85,7 @@ fn test_lookup_returns_download_requests() {
             author: None,
             ids: None,
             page_key: None,
+            ..Default::default()
         }),
         credential: None,
         params: None,
