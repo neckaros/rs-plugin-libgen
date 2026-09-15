@@ -22,7 +22,7 @@ use libgen::{
 
 enum LookupTarget {
     IsbnSearch(String),
-    TitleSearch(String),
+    TitleSearch { query: String, include_series: bool },
 }
 
 #[plugin_fn]
@@ -121,7 +121,13 @@ fn resolve_lookup_targets(lookup: &RsLookupWrapper) -> Vec<LookupTarget> {
 
     // Priority 3: Search the title/author index with every supported relation term.
     if let Some(search) = build_text_search(book) {
-        targets.push(LookupTarget::TitleSearch(search));
+        targets.push(LookupTarget::TitleSearch {
+            query: search,
+            include_series: book
+                .series
+                .as_ref()
+                .is_some_and(|series| !series.is_empty()),
+        });
     }
 
     targets
@@ -258,13 +264,29 @@ fn normalize_filter_value(value: &str) -> String {
         .join(" ")
 }
 
+fn filter_search_results(
+    query: &rs_plugin_common_interfaces::lookup::RsLookupBook,
+    mut books: Vec<LibgenBook>,
+    next_page_key: Option<String>,
+) -> (Vec<LibgenBook>, Option<String>) {
+    books.retain(|book| book_matches_filters(query, book));
+    (books, next_page_key)
+}
+
 fn execute_search(
     target: &LookupTarget,
     page: Option<u32>,
 ) -> FnResult<(Vec<LibgenBook>, Option<String>)> {
     let (query, column) = match target {
         LookupTarget::IsbnSearch(isbn) => (isbn.as_str(), SearchColumn::Isbn),
-        LookupTarget::TitleSearch(title) => (title.as_str(), SearchColumn::TitleAuthor),
+        LookupTarget::TitleSearch {
+            query,
+            include_series: true,
+        } => (query.as_str(), SearchColumn::TitleAuthorSeries),
+        LookupTarget::TitleSearch {
+            query,
+            include_series: false,
+        } => (query.as_str(), SearchColumn::TitleAuthor),
     };
 
     let url = build_search_url(query, page, &column)
@@ -321,19 +343,21 @@ pub fn lookup_metadata(
         _ => None,
     };
 
-    // Try each target in priority order until we get results
+    // Try each target in priority order until we get results. Keep a provider
+    // pagination key even when stricter local relation checks empty this page.
+    let mut filtered_page_next_key = None;
     for target in &targets {
         let match_type = match target {
             LookupTarget::IsbnSearch(_) => Some(RsLookupMatchType::ExactId),
-            LookupTarget::TitleSearch(_) => Some(RsLookupMatchType::ExactText),
+            LookupTarget::TitleSearch { .. } => Some(RsLookupMatchType::ExactText),
         };
 
-        let (mut books, next_page_key) = execute_search(target, page)?;
+        let (books, next_page_key) = execute_search(target, page)?;
         let book_query = match &lookup.query {
             RsLookupQuery::Book(query) => query,
             _ => unreachable!("lookup targets are only produced for books"),
         };
-        books.retain(|book| book_matches_filters(book_query, book));
+        let (books, next_page_key) = filter_search_results(book_query, books, next_page_key);
         if !books.is_empty() {
             let results = books
                 .into_iter()
@@ -344,11 +368,14 @@ pub fn lookup_metadata(
                 next_page_key,
             }));
         }
+        if filtered_page_next_key.is_none() {
+            filtered_page_next_key = next_page_key;
+        }
     }
 
     Ok(Json(RsLookupMetadataResults {
         results: vec![],
-        next_page_key: None,
+        next_page_key: filtered_page_next_key,
     }))
 }
 
@@ -369,12 +396,12 @@ pub fn lookup(Json(lookup): Json<RsLookupWrapper>) -> FnResult<Json<RsLookupSour
 
     // Try each target in priority order until we get results
     for target in &targets {
-        let (mut books, _) = execute_search(target, None)?;
+        let (books, next_page_key) = execute_search(target, None)?;
         let book_query = match &lookup.query {
             RsLookupQuery::Book(query) => query,
             _ => unreachable!("lookup targets are only produced for books"),
         };
-        books.retain(|book| book_matches_filters(book_query, book));
+        let (books, _) = filter_search_results(book_query, books, next_page_key);
         if books.is_empty() {
             continue;
         }
@@ -469,7 +496,10 @@ mod tests {
         let targets = resolve_lookup_targets(&lookup);
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            LookupTarget::TitleSearch(search) => assert_eq!(search, "Changes Jim Butcher"),
+            LookupTarget::TitleSearch {
+                query,
+                include_series: false,
+            } => assert_eq!(query, "Changes Jim Butcher"),
             _ => panic!("Expected title search with author"),
         }
     }
@@ -496,7 +526,10 @@ mod tests {
             _ => panic!("Expected ISBN first"),
         }
         match &targets[1] {
-            LookupTarget::TitleSearch(search) => assert_eq!(search, "Storm Front Jim Butcher"),
+            LookupTarget::TitleSearch {
+                query,
+                include_series: false,
+            } => assert_eq!(query, "Storm Front Jim Butcher"),
             _ => panic!("Expected title+author fallback"),
         }
     }
@@ -524,7 +557,8 @@ mod tests {
         let targets = resolve_lookup_targets(&lookup);
         assert!(matches!(
             targets.as_slice(),
-            [LookupTarget::TitleSearch(search)] if search == "Dune Frank Herbert Dune Chronicles"
+            [LookupTarget::TitleSearch { query, include_series: true }]
+                if query == "Dune Frank Herbert Dune Chronicles"
         ));
     }
 
@@ -547,7 +581,8 @@ mod tests {
 
         assert!(matches!(
             resolve_lookup_targets(&lookup).as_slice(),
-            [LookupTarget::TitleSearch(search)] if search == "octavia e butler"
+            [LookupTarget::TitleSearch { query, include_series: false }]
+                if query == "octavia e butler"
         ));
     }
 
@@ -579,5 +614,25 @@ mod tests {
             };
             assert!(resolve_lookup_targets(&lookup).is_empty());
         }
+    }
+
+    #[test]
+    fn filtered_empty_page_preserves_next_page_key() {
+        let query = RsLookupBook {
+            people: Some(vec![RsLookupPersonFilter {
+                name: Some("Frank Herbert".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let books = vec![LibgenBook {
+            title: "A different book".to_string(),
+            author: "Another Author".to_string(),
+            ..Default::default()
+        }];
+
+        let (filtered, next_page_key) = filter_search_results(&query, books, Some("2".to_string()));
+        assert!(filtered.is_empty());
+        assert_eq!(next_page_key.as_deref(), Some("2"));
     }
 }

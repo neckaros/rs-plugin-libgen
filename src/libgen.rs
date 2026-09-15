@@ -19,6 +19,7 @@ pub struct LibgenBook {
 
 pub enum SearchColumn {
     TitleAuthor,
+    TitleAuthorSeries,
     Isbn,
 }
 
@@ -46,6 +47,7 @@ pub fn build_search_url(query: &str, page: Option<u32>, column: &SearchColumn) -
 
     let columns = match column {
         SearchColumn::TitleAuthor => "columns%5B%5D=t&columns%5B%5D=a",
+        SearchColumn::TitleAuthorSeries => "columns%5B%5D=t&columns%5B%5D=a&columns%5B%5D=s",
         SearchColumn::Isbn => "columns%5B%5D=i",
     };
 
@@ -341,6 +343,15 @@ mod tests {
         assert!(url.contains("columns%5B%5D=t"));
         assert!(url.contains("columns%5B%5D=a"));
         assert!(url.contains("page=1"));
+    }
+
+    #[test]
+    fn test_build_search_url_title_author_series() {
+        let url =
+            build_search_url("dune chronicles", None, &SearchColumn::TitleAuthorSeries).unwrap();
+        assert!(url.contains("columns%5B%5D=t"));
+        assert!(url.contains("columns%5B%5D=a"));
+        assert!(url.contains("columns%5B%5D=s"));
     }
 
     #[test]
